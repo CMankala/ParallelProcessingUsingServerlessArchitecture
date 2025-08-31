@@ -1,0 +1,105 @@
+{
+  "Comment": "Parallel Clinicalbert Inference Workflow for S3 Data Batches (Inline Map - Direct Array Input)",
+  "StartAt": "PrepareDataChunks",
+  "States": {
+    "PrepareDataChunks": {
+      "Type": "Task",
+      "Comment": "Lambda to list input files/chunks in S3 and prepare batch details, returning array directly",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-2:867828046632:function:InferenceBatchPreparer",
+        "Payload": {
+          "input_bucket": "clinicalbertinputfiles",
+          "output_bucket": "clinicalbertoutputfiles"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 15,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "Next": "HandleChunkingFailure",
+          "Comment": "Handle failure in preparing data chunks"
+        }
+      ],
+      "ResultPath": "$.batches_to_process",
+      "Next": "ProcessBatchesInParallel"
+    },
+    "ProcessBatchesInParallel": {
+      "Type": "Map",
+      "Comment": "Process each batch in parallel using Inline Map. Input to Map must be an array. (Subject to 256KB payload limit)",
+      "MaxConcurrency": 1000,
+      "Iterator": {
+        "StartAt": "InferenceTask",
+        "States": {
+          "InferenceTask": {
+            "Type": "Task",
+            "Comment": "Invoke Lambda for Clinicalbert inference on a single batch",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "arn:aws:lambda:us-east-2:867828046632:function:ClinicalbertInferenceLambda",
+              "Payload.$": "$"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 30,
+                "MaxAttempts": 15,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed",
+                  "States.Timeout",
+                  "States.Permissions"
+                ],
+                "Comment": "Handle errors for this specific batch process",
+                "ResultPath": "$.errorInfo",
+                "Next": "RecordBatchFailure"
+              }
+            ],
+            "End": true
+          },
+          "RecordBatchFailure": {
+            "Type": "Task",
+            "Comment": "Lambda to record details of failed batch processing",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "arn:aws:lambda:us-east-2:867828046632:function:InferenceErrorHandler",
+              "Payload.$": "$"
+            },
+            "End": true
+          }
+        }
+      },
+      "ItemsPath": "$.batches_to_process.Payload",
+      "ResultPath": "$.parallel_results",
+      "End": true
+    },
+    "HandleChunkingFailure": {
+      "Type": "Fail",
+      "Cause": "Workflow failed because the initial data chunking step failed.",
+      "Error": "DataChunkingFailed"
+    }
+  }
+}

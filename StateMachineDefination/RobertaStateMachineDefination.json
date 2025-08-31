@@ -1,0 +1,74 @@
+{
+  "Comment": "Parallel RoBERTa Inference Workflow for S3 Data Batches (Distributed Map) to process up to 10000 files concurrently.",
+  "StartAt": "ProcessFilesInParallel",
+  "States": {
+    "ProcessFilesInParallel": {
+      "Type": "Map",
+      "Comment": "Process each file in parallel using Distributed Map for scalability.",
+      "MaxConcurrency": 10000,
+      "ToleratedFailurePercentage": 5,
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:listObjectsV2",
+        "Parameters": {
+          "Bucket": "robertainputbucket"
+        }
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "EXPRESS"
+        },
+        "StartAt": "InferenceTask",
+        "States": {
+          "InferenceTask": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "arn:aws:lambda:us-east-2:867828046632:function:roberta-inference-sentiment",
+              "Payload": {
+                "S3Object": {
+                  "Bucket": "robertainputbucket",
+                  "Key.$": "$.Key"
+                }
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 30,
+                "MaxAttempts": 15,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "Next": "HandleInferenceFailure"
+              }
+            ],
+            "End": true
+          },
+          "HandleInferenceFailure": {
+            "Type": "Fail",
+            "Cause": "RoBERTa inference failed for a specific file."
+          }
+        }
+      },
+      "ResultWriter": {
+        "Resource": "arn:aws:states:::s3:putObject",
+        "Parameters": {
+          "Bucket": "robertaoutputbucket",
+          "Prefix": "roberta-inference-output/"
+        }
+      },
+      "End": true
+    }
+  }
+}
